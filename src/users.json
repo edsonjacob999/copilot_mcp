@@ -1,0 +1,11 @@
+{
+  "performer": {
+    "performer1": "performer123"
+  },
+  "coordinator": {
+    "coordinator1": "coordinator123"
+  },
+  "admin": {
+    "admin1": "admin123"
+  }
+}

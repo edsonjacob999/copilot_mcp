@@ -5,19 +5,59 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
+from typing import Literal
+import json
 import os
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
 
+app.add_middleware(SessionMiddleware, secret_key="dev-secret-change-me")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Mount the static files directory
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+users_file = current_dir / "users.json"
+with open(users_file, "r", encoding="utf-8") as file:
+    users = json.load(file)
+
+VALID_ROLES = {"performer", "coordinator", "admin"}
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    role: Literal["performer", "coordinator", "admin"]
+
+
+def require_authenticated_role(request: Request):
+    role = request.session.get("role")
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return role
+
+
+def require_role(request: Request, allowed_roles: set[str]):
+    role = require_authenticated_role(request)
+    if role not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Insufficient role permissions")
+    return role
 
 # In-memory activity database
 activities = {
@@ -88,9 +128,49 @@ def get_activities():
     return activities
 
 
+@app.post("/auth/login")
+def login(payload: LoginRequest, request: Request):
+    role_users = users.get(payload.role, {})
+    if role_users.get(payload.username) != payload.password:
+        raise HTTPException(status_code=401, detail="Invalid username, password, or role")
+
+    request.session["username"] = payload.username
+    request.session["role"] = payload.role
+
+    return {
+        "message": "Logged in successfully",
+        "user": {
+            "username": payload.username,
+            "role": payload.role,
+        },
+    }
+
+
+@app.post("/auth/logout")
+def logout(request: Request):
+    request.session.clear()
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/auth/me")
+def get_current_user(request: Request):
+    role = request.session.get("role")
+    username = request.session.get("username")
+
+    if role not in VALID_ROLES or not username:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    return {
+        "username": username,
+        "role": role,
+    }
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, request: Request):
     """Sign up a student for an activity"""
+    require_role(request, {"performer", "coordinator", "admin"})
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +191,10 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, request: Request):
     """Unregister a student from an activity"""
+    require_role(request, {"coordinator", "admin"})
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
